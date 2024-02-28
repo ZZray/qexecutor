@@ -1,0 +1,167 @@
+#pragma once
+#include <QEventLoop>
+#include <QObject>
+#include <QFutureWatcher>
+#include <QtConcurrent/QtConcurrent>
+// #include "algorithms/algorithm.hpp"
+#include <utility>
+#include <type_traits>
+
+namespace ray::executor
+{
+
+// template <class F, class... P, class R = std::invoke_result_t<F, P...>>
+// auto coExecute(F&& callback, P... args) -> QCoro::Task<QFuture<R>>
+//{
+//     co_return QtConcurrent::run(callback, std::forward<P>(args)...);
+// }
+//
+// template <typename R>
+// R syncWait(QCoro::Task<QFuture<R>>& future)
+//{
+//     return QCoro::waitFor(future);
+// }
+
+template <class F, class... P, class R = std::invoke_result_t<F, P...>>
+auto execute(F&& callback, P... args)
+{
+    return QtConcurrent::run(callback, std::forward<P>(args)...);
+}
+
+template <template <typename...> typename Sequence, typename V, typename F, typename R = std::invoke_result_t<F, V>>
+auto executeBatch(const Sequence<V>& sequence, F&& f)
+{
+    Sequence<QFuture<R>> futures(sequence.size());
+    for (int i = 0; i < futures.size(); ++i) {
+        futures[i] = execute(f, sequence[i]);
+    }
+    return futures;
+}
+
+template <template <typename...> typename Sequence, typename V, typename F, typename R = std::invoke_result_t<F, V>>
+auto executeBatchSingleThread(const Sequence<V>& sequence, F&& f)
+{
+    Sequence<QFuture<R>> futures(sequence.size());
+    for (int i = 0; i < futures.size(); ++i) {
+        futures[i] = execute(f, sequence[i]);
+        futures[i].waitForFinished();
+    }
+    return futures;
+}
+
+template <typename R>
+auto syncWait(const QFuture<R>& future) -> std::conditional_t<!std::is_void_v<R>, R, void>
+{
+    QEventLoop loop;
+    QFutureWatcher<R> watcher;
+    auto connection = QObject::connect(&watcher, &QFutureWatcher<R>::finished, &loop, [&loop] {
+        if (loop.isRunning()) {
+            loop.quit();
+        }
+    });
+    watcher.setFuture(future);
+    QTimer::singleShot(0, &loop, [&] {
+        if (future.isFinished() && loop.isRunning()) {
+            loop.quit();
+        }
+    });
+    loop.exec();
+    QObject::disconnect(connection);
+    if constexpr (std::is_void_v<R>) {
+        return;
+    }
+    else {
+        return future.result();
+    }
+}
+
+template <template <typename...> typename Sequence, typename R>
+auto syncWait(Sequence<QFuture<R>>& futures) -> std::conditional_t<!std::is_void_v<R>, Sequence<R>, void>
+{
+    if constexpr (!std::is_void_v<R>) {
+        Sequence<R> results;
+        if constexpr (requires { results.reserve(0); }) {
+            results.reserve(futures.size());
+        }
+        for (auto& future : futures) {
+            results.push_back(syncWait(future));
+        }
+        return results;
+    }
+    else {
+        for (auto& future : futures) {
+            syncWait(std::move(future));
+        }
+    }
+}
+
+// 其他：
+template <class F, class... P, class R = std::invoke_result_t<F, P...>>
+auto executeSync(F&& callback, P... args) -> R
+{
+    return syncWait(execute(std::forward<F>(callback), std::forward<P>(args)...));
+}
+
+// template <typename Sequence, typename F, typename P>
+// auto executeBatch(const Sequence& sequence, F&& f, P&& p)
+//{
+//     using R             = decltype(f(std::declval<typename Sequence::value_type>()));
+//     using FutureWatcher = QFutureWatcher<R>;
+//     auto futureWatcher  = new FutureWatcher;
+//     // 加 loading
+//     // auto loading = useLoading(nullptr, [&futureWatcher](auto) {
+//     //    // 加取消
+//     //    futureWatcher->cancel();
+//     //});
+//     // 加多线程
+//     QEventLoop loop;
+//     QObject::connect(futureWatcher, &FutureWatcher::finished, &loop, &QEventLoop::quit);
+//     QObject::connect(futureWatcher, &FutureWatcher::finished, futureWatcher, &FutureWatcher::deleteLater);
+//     // 加进度
+//     QObject::connect(futureWatcher, &FutureWatcher::progressRangeChanged, [](int minimum, int maximum) {
+//         qDebug() << "range changed: " << minimum << maximum;
+//     });
+//     QObject::connect(futureWatcher, &FutureWatcher::progressValueChanged, [](int value) {
+//         qDebug() << "progress: " << value;
+//         // loading.setProgress(value);
+//     });
+//     // 获取当前选中的线
+//     // const auto data =useProcessingStore()->current()->dataForProcessing();
+//     futureWatcher->setFuture(QtConcurrent::mapped(sequence, f));
+//
+//     loop.exec();
+//     futureWatcher->waitForFinished();
+//     return futureWatcher;
+// }
+
+//
+// template <template <typename...> typename Sequence, typename V, typename F, typename R = std::invoke_result_t<F, V>>
+// auto coExecuteBatch(const Sequence<V>& sequence, F&& f) -> QCoro::Task<std::conditional_t<std::is_same_v<R, void>, void, Sequence<R>>>
+//{
+//     QVector<QFuture<R>> futures;
+//     for (const auto& data : sequence) {
+//         futures.append(executeAsync(f, data));
+//     }
+//     // wait for results
+//     if constexpr (std::is_same_v<R, void>) {
+//         for (const auto& future : futures) {
+//             co_await future;
+//         }
+//     }
+//     else {
+//         Sequence<R> results;
+//         for (const auto& future : futures) {
+//             results.push_back(co_await future);
+//         }
+//         co_return results;
+//     }
+// }
+//
+////
+//
+// template <class F, class... P, class R = std::invoke_result_t<F, P...>>
+// auto coExecute(F&& callback, P... args) -> R
+//{
+//    return QCoro::waitFor(coExecuteAsync(std::forward<F>(callback)), std::forward<P>(args)...);
+//}
+} // namespace cq::ps::executor
